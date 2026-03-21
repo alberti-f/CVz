@@ -1,0 +1,39 @@
+# Ignore log files
+*.log
+
+# Ignore cache files
+__pycache__/
+
+# Ignore temporary files
+*tmp.*
+
+# Ignore temporary notebook files
+.ipynb_checkpoints/
+notebooks/*
+*.ipynb
+
+# Ignore cluster simulator
+run_analyses.sh
+
+# Ignore local paths file
+*directories.txt
+*.json
+
+# Ignore subject pairs file
+subject_pairs.txt
+
+# Ignore logs
+logs*/
+errs*/
+*.out
+*.err
+
+# Ignore package info
+src/*.egg-info/*
+
+# Ignore R environment
+*.Rproj
+*.Rhistory
+*.Rprofile
+*renv.lock
+*/renv/*
