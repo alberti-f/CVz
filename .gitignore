@@ -29,7 +29,7 @@ errs*/
 *.err
 
 # Ignore package info
-src/*.egg-info/*
+*.egg-info/*
 
 # Ignore R environment
 *.Rproj
