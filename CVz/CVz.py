@@ -32,6 +32,30 @@ def scale_splits(*pairs):
     return [_scale_pair(tr, te) for tr, te in pairs]
 
 
+def prediction_metrics(y_true, y_pred):
+    """
+    Compute common regression metrics for true vs predicted values.
+
+    Parameters
+    ----------
+    y_true : array-like
+        True target values.
+    y_pred : array-like
+        Predicted target values.
+
+    Returns
+    -------
+    dict
+        Dictionary containing correlation, R^2, MAE, and RMSE.
+    """
+    return {
+        "r": np.corrcoef(y_true, y_pred)[0, 1],
+        "r2": r2_score(y_true, y_pred),
+        "mae": mean_absolute_error(y_true, y_pred),
+        "rmse": root_mean_squared_error(y_true, y_pred),
+    }
+
+
 def _eval_dict(fitted_model, Xte, yte):
     """
     Extract predictions, metrics, and all numeric learned attributes
@@ -52,10 +76,7 @@ def _eval_dict(fitted_model, Xte, yte):
     out = {
         "y_true": y_true,
         "y_pred": y_pred,
-        "r": np.corrcoef(y_true, y_pred)[0, 1],
-        "r2": r2_score(y_true, y_pred),
-        "mae": mean_absolute_error(y_true, y_pred),
-        "rmse": root_mean_squared_error(y_true, y_pred),
+        **prediction_metrics(y_true, y_pred)
     }
 
     for attr in dir(m):
@@ -67,7 +88,7 @@ def _eval_dict(fitted_model, Xte, yte):
             out[attr] = val
 
         elif isinstance(val, (int, float, np.floating, np.integer)):
-            out[attr[:-1]] = val
+            out[attr] = val
 
     return out
 
@@ -109,7 +130,7 @@ def residualize_splits(Ytr, Yte, Xtr, Xte, fit_intercept=True):
     return np.atleast_1d(Ytr_res.squeeze()), np.atleast_1d(Yte_res.squeeze())
 
 
-def run_cv(X, y, model, split, C=None, residualize_X=False):
+def run_cv(X, y, model, split, C=None, residualize_X=False, param_grid=None, inner_split=None, grid_search_kw={}):
     """
     Cross-validated analysis with optional covariate residualization and scaling.
 
@@ -133,25 +154,34 @@ def run_cv(X, y, model, split, C=None, residualize_X=False):
     """
 
     res = []
-
-    for tr, te in split.split(X):
+    splits = list(split.split(X))
+    for tr, te in splits:
+        fold_res = {"fold": len(res) + 1}
+        m = clone(model)
         Xtr, Xte = X[tr], X[te]
         ytr, yte = y[tr], y[te]
+        Ctr, Cte = (None, None) if C is None else (C[tr], C[te])
+
+        if param_grid is not None:
+            if inner_split is None:
+                raise ValueError("param_grid provided without inner_split for hyperparameter tuning.")
+            best_params, _, _ = grid_search(param_grid, Xtr, ytr, model, inner_split,
+                                            C=Ctr, residualize_X=residualize_X, **grid_search_kw)
+            m.set_params(**best_params)
+            fold_res = fold_res | best_params
 
         if C is not None:
-            Ctr, Cte = C[tr], C[te]
             Ctr, Cte = scale_splits((Ctr, Cte))[0]
-
             ytr, yte = residualize_splits(ytr, yte, Ctr, Cte, fit_intercept=True)
             if residualize_X:
                 Xtr, Xte = residualize_splits(Xtr, Xte, Ctr, Cte, fit_intercept=True)
         Xtr, Xte = scale_splits((Xtr, Xte))[0]
 
-        m = clone(model)
+
         if hasattr(m, "fit_intercept"):
-            m.set_params(fit_intercept=True) # Force no intercept, data is centered (but double-check)
+            m.set_params(fit_intercept=True) 
         m.fit(Xtr, ytr)
-        res.append(_eval_dict(m, Xte, yte))
+        res.append(fold_res | _eval_dict(m, Xte, yte))
 
     return res
 
@@ -173,7 +203,7 @@ def summarize_results(res):
 
         try:
             arr = np.stack(vals)
-            summary[f"median_{k}"] = np.median(arr, axis=0)
+            summary[f"mean_{k}"] = np.mean(arr, axis=0)
             summary[f"std_{k}"] = arr.std(axis=0)
         except Exception:
             continue
@@ -181,12 +211,13 @@ def summarize_results(res):
     return summary
 
 
-def permutation_test(X, y, model, split, C=None, n_perm=1000, seed=0, metric="r", residualize_X=False):
+def permutation_test(X, y, model, split, C=None, n_perm=1000, seed=0, metric="r", residualize_X=False,
+                     agg_func=np.median, param_grid=None, inner_split=None, grid_search_kw={}):
     rng = np.random.default_rng(seed)
-
-    def score(y_):
-        res = run_cv(X, y_, model, split, C=C, residualize_X=residualize_X)
-        return np.median([d[metric] for d in res])
+    def score(y_): # will move outside later
+        res = run_cv(X, y_, model, split, C=C, residualize_X=residualize_X,
+                     param_grid=param_grid, inner_split=inner_split, grid_search_kw=grid_search_kw)
+        return agg_func([d[metric] for d in res])
 
     real = score(y)
 
@@ -206,7 +237,7 @@ def permutation_test(X, y, model, split, C=None, n_perm=1000, seed=0, metric="r"
     }
 
 
-def grid_search(param_grid, X, y, model, split, C=None, metric="r"):
+def grid_search(param_grid, X, y, model, split, C=None, metric="r", agg_func=np.mean, residualize_X=False):
 
     from itertools import product
 
@@ -220,12 +251,17 @@ def grid_search(param_grid, X, y, model, split, C=None, metric="r"):
 
         m = clone(model).set_params(**params)
 
-        res = run_cv(X, y, m, split, C=C, residualize_X=False)
-        score = np.median([d[metric] for d in res])
+        res = run_cv(X, y, m, split, C=C, residualize_X=residualize_X)
+        score = agg_func([d[metric] for d in res])
 
         results.append({
             "params": params,
             "score": score
         })
 
-    return results
+    best_func = np.argmax if metric in ["r", "r2"] else np.argmin
+    best_idx = best_func([r["score"] for r in results])
+    best_params = results[best_idx]["params"]
+    best_score = results[best_idx]["score"]
+
+    return best_params, best_score, results
