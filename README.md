@@ -1,4 +1,4 @@
-# cleanfit
+# CVz
 
 A lightweight Python utility for **confound-controlled modelling**. Built for personal use in neuroscience and psychology research, where the core question is:
 
@@ -27,7 +27,7 @@ The package handles covariate residualization, scaling, cross-validated model ev
 import numpy as np
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
-from cleanfit import run_cv, permutation_test, summarize_results
+from CVz.CVz import run_cv, permutation_test, summarize_results
 
 X = np.random.randn(100, 50)   # features
 y = np.random.randn(100)       # target
@@ -66,4 +66,5 @@ pip install -r requirements.txt
 - Developed for personal research use. No guarantees of stability or API consistency across versions.
 - Residualization uses OLS (`np.linalg.lstsq`) with an intercept by default.
 - Covariates are scaled before residualization; features are scaled after.
+- Any sklearn-compatible regressor with `fit` and `predict` should work, including `PLSRegression`, `Ridge`, `SVR`, and tree-based regressors.
 - `summarize_results` computes per-fold median and std for all numeric outputs returned by `_eval_dict`, including model coefficients where available.
