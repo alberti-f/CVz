@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "CVz"
 version = "0.1.0"
-description = "A minimal Python package for easy cross validation with nuissance regressors."
+description = "A minimal Python package for easy cross validation with nuisance regressors."
 authors = [{ name = "Francesco Alberti" }]
 dependencies = [
     "numpy",
