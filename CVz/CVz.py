@@ -1,9 +1,10 @@
 import numpy as np
-from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_absolute_error, root_mean_squared_error
 from sklearn.base import clone
 from joblib import Parallel, delayed
+from itertools import product
+
 
 def _scale_pair(tr, te):
     s = StandardScaler()
@@ -25,11 +26,59 @@ def scale_splits(*pairs):
 
     Example
     -------
-    (Xtr, Xte), (Ctr, Cte), (ytr, yte) = scale_splits(
+    (Xtr, Xte), (Ctr, Cte), (ytr[:, None], yte[:, None]) = scale_splits(
         (Xtr, Xte), (Ctr, Cte), (ytr[:, None], yte[:, None])
     )
     """
     return [_scale_pair(tr, te) for tr, te in pairs]
+
+
+def _pairwise_corr(A, B, copy=True):
+    """
+    Compute column-wise correlation coefficients between two matrices.
+
+    Parameters
+    ----------
+    A : numpy.ndarray
+        First input matrix.
+    B : numpy.ndarray
+        Second input matrix.
+
+    Returns
+    -------
+    numpy.ndarray
+        Correlation coefficients for each column.
+    """
+
+    A = np.asarray(A)
+    B = np.asarray(B)
+    if A.ndim == 1:
+        A = A[:, None]
+    if B.ndim == 1:
+        B = B[:, None]
+    if A.shape[0] != B.shape[0]:
+        raise ValueError("A and B must have the same number of samples.")
+    if A.shape[1] != B.shape[1]:
+        raise ValueError("A and B must have the same number of columns.")
+
+    # center the matrices
+    if copy:
+        A = A.copy()
+        B = B.copy()
+    A -= A.mean(axis=0)
+    B -= B.mean(axis=0)
+
+    # Calculate correlation coefficients
+    numer = np.sum(A * B, axis=0)
+    denom = np.linalg.norm(A, axis=0) * np.linalg.norm(B, axis=0)
+    return np.divide(numer, denom, out=np.full(numer.shape, np.nan, dtype=float), where=denom > 0)
+
+
+def _as_2d_columns(y):
+    y = np.asarray(y)
+    if y.ndim == 1:
+        return y[:, None]
+    return y
 
 
 def prediction_metrics(y_true, y_pred):
@@ -48,11 +97,19 @@ def prediction_metrics(y_true, y_pred):
     dict
         Dictionary containing correlation, R^2, MAE, and RMSE.
     """
+    y_true = _as_2d_columns(y_true)
+    y_pred = _as_2d_columns(y_pred)
+
+    if y_true.shape[0] != y_pred.shape[0]:
+        raise ValueError("y_true and y_pred must have the same number of samples.")
+    if y_true.shape[1] != y_pred.shape[1]:
+        raise ValueError("y_true and y_pred must have matching output dimensions.")
+
     return {
-        "r": np.corrcoef(y_true, y_pred)[0, 1],
-        "r2": r2_score(y_true, y_pred),
-        "mae": mean_absolute_error(y_true, y_pred),
-        "rmse": root_mean_squared_error(y_true, y_pred),
+        "r": _pairwise_corr(y_true, y_pred, copy=False),
+        "r2": np.atleast_1d(np.asarray(r2_score(y_true, y_pred, multioutput="raw_values"), dtype=float)),
+        "mae": np.atleast_1d(np.asarray(mean_absolute_error(y_true, y_pred, multioutput="raw_values"), dtype=float)),
+        "rmse": np.atleast_1d(np.asarray(root_mean_squared_error(y_true, y_pred, multioutput="raw_values"), dtype=float)),
     }
 
 
@@ -70,7 +127,7 @@ def _eval_dict(fitted_model, Xte, yte):
     m = getattr(fitted_model, "model_", fitted_model)
 
     y_pred = m.predict(Xte)
-    y_true = np.atleast_1d(yte)
+    y_true = np.asarray(yte)
     y_pred = np.asarray(y_pred)
 
     out = {
@@ -83,7 +140,9 @@ def _eval_dict(fitted_model, Xte, yte):
         if not attr.endswith("_") or attr.startswith("__"):
             continue
 
-        val = getattr(m, attr)
+        try: val = getattr(m, attr)
+        except Exception: continue
+
         if isinstance(val, np.ndarray):
             out[attr] = val
 
@@ -91,6 +150,16 @@ def _eval_dict(fitted_model, Xte, yte):
             out[attr] = val
 
     return out
+
+
+def _set_optional_model_params(model, **params):
+    available_params = model.get_params(deep=True) if hasattr(model, "get_params") else {}
+    usable_params = {k: v for k, v in params.items() if k in available_params}
+
+    if usable_params and hasattr(model, "set_params"):
+        model.set_params(**usable_params)
+
+    return model
 
 
 def _add_intercept(X):
@@ -130,7 +199,7 @@ def residualize_splits(Ytr, Yte, Xtr, Xte, fit_intercept=True):
     return np.atleast_1d(Ytr_res.squeeze()), np.atleast_1d(Yte_res.squeeze())
 
 
-def run_cv(X, y, model, split, C=None, residualize_X=False, param_grid=None, inner_split=None, grid_search_kw={}):
+def run_cv(X, y, model, split, C=None, residualize_X=False, param_grid=None, inner_split=None, grid_search_kw=None):
     """
     Cross-validated analysis with optional covariate residualization and scaling.
 
@@ -140,18 +209,24 @@ def run_cv(X, y, model, split, C=None, residualize_X=False, param_grid=None, inn
         Feature matrix.
     y : ndarray
         Target vector.
-    model : estimator 
-        sklearn-like estimator with fit and predict methods. 
-    splits : int, default 5
-        Number of CV folds.
+    model : estimator
+        sklearn-like estimator with fit and predict methods.
+    split : CV splitter
+        Any sklearn-like splitter implementing split(X).
     C : ndarray, optional
         Covariate matrix for residualization. If None, no residualization is performed.
-    seed : int, default 0
-        Random seed for reproducibility.
     residualize_X : bool, default False
         Whether to residualize features in addition to the target. If True, X
         is residualized using the same covariates C and train/test split as y.
+
+    Notes
+    -----
+    If the estimator exposes a ``fit_intercept`` parameter, it is
+    explicitly set to ``True`` before fitting in each fold.
     """
+
+    if grid_search_kw is None:
+        grid_search_kw = {}
 
     res = []
     splits = list(split.split(X))
@@ -177,9 +252,7 @@ def run_cv(X, y, model, split, C=None, residualize_X=False, param_grid=None, inn
                 Xtr, Xte = residualize_splits(Xtr, Xte, Ctr, Cte, fit_intercept=True)
         Xtr, Xte = scale_splits((Xtr, Xte))[0]
 
-
-        if hasattr(m, "fit_intercept"):
-            m.set_params(fit_intercept=True) 
+        m = _set_optional_model_params(m, fit_intercept=True)
         m.fit(Xtr, ytr)
         res.append(fold_res | _eval_dict(m, Xte, yte))
 
@@ -212,12 +285,17 @@ def summarize_results(res):
 
 
 def permutation_test(X, y, model, split, C=None, n_perm=1000, seed=0, metric="r", residualize_X=False,
-                     agg_func=np.median, param_grid=None, inner_split=None, grid_search_kw={}):
+                     agg_func=np.median, param_grid=None, inner_split=None, grid_search_kw=None):
+    
+    if grid_search_kw is None:
+        grid_search_kw = {}
+
     rng = np.random.default_rng(seed)
     def score(y_): # will move outside later
         res = run_cv(X, y_, model, split, C=C, residualize_X=residualize_X,
                      param_grid=param_grid, inner_split=inner_split, grid_search_kw=grid_search_kw)
-        return agg_func([d[metric] for d in res])
+        fold_metric = np.asarray([d[metric] for d in res], dtype=float)
+        return float(agg_func(fold_metric.reshape(-1)))
 
     real = score(y)
 
@@ -239,8 +317,6 @@ def permutation_test(X, y, model, split, C=None, n_perm=1000, seed=0, metric="r"
 
 def grid_search(param_grid, X, y, model, split, C=None, metric="r", agg_func=np.mean, residualize_X=False):
 
-    from itertools import product
-
     keys = list(param_grid.keys())
     combos = list(product(*param_grid.values()))
 
@@ -252,7 +328,8 @@ def grid_search(param_grid, X, y, model, split, C=None, metric="r", agg_func=np.
         m = clone(model).set_params(**params)
 
         res = run_cv(X, y, m, split, C=C, residualize_X=residualize_X)
-        score = agg_func([d[metric] for d in res])
+        fold_metric = np.asarray([d[metric] for d in res], dtype=float)
+        score = float(agg_func(fold_metric.reshape(-1)))
 
         results.append({
             "params": params,
