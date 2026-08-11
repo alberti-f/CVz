@@ -106,7 +106,7 @@ def prediction_metrics(y_true, y_pred):
         raise ValueError("y_true and y_pred must have matching output dimensions.")
 
     return {
-        "r": _pairwise_corr(y_true, y_pred, copy=False),
+        "r": _pairwise_corr(y_true, y_pred, copy=True),
         "r2": np.atleast_1d(np.asarray(r2_score(y_true, y_pred, multioutput="raw_values"), dtype=float)),
         "mae": np.atleast_1d(np.asarray(mean_absolute_error(y_true, y_pred, multioutput="raw_values"), dtype=float)),
         "rmse": np.atleast_1d(np.asarray(root_mean_squared_error(y_true, y_pred, multioutput="raw_values"), dtype=float)),
